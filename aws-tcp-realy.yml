@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: NGINX Single-Port TCP Relay
+Parameters:
+    InstanceType:
+        Type: String
+        Default: t2.micro
+        AllowedValues:
+          - t2.micro
+          - t2.medium
+          - t2.small
+        Description: Instance Type
+    AMI:
+        Type: String
+        Default: ami-1853ac65
+        Description: Amazon Linux 1 AMI ID
+    AWSKeyPair:
+        Type: AWS::EC2::KeyPair::KeyName
+        Description: AWS Keypair for Instance Access
+    RelayName:
+        Type: String
+        Description: AWS Name Tag for Instance
+        MaxLength: 14
+    VPC:
+        Type: AWS::EC2::VPC::Id
+        Description: VPC to Launch Relay Instance
+    Subnet:
+        Type: AWS::EC2::Subnet::Id
+        Description: Subnet to Deploy Relay Instance.  Public Subnet required to handle traffic to/from Internet. 
+    ListenPort:
+        Type: String
+        Description: Port to listen for incoming requests
+    DestinationPort:
+        Type: String
+        Description: Target port on destination host/ip
+    DestinationHost:
+        Type: String
+        Description: Host or IP address to send relayed traffic
+Resources:
+    Worker1:
+        Type: AWS::EC2::Instance
+        Metadata:
+            AWS::CloudFormation::Init:
+                configSets:
+                    bootStrap:
+                        - preconfig
+                        - config
+                preconfig:
+                    commands:
+                        1-epel:
+                            command: yum-config-manager --enable epel
+                config:
+                    packages:
+                        yum: 
+                            nginx: []
+                            nginx-mod-stream: []
+                    files:
+                        /etc/cfn/cfn-hup.conf:
+                            content: !Sub |
+                              [main]
+                              stack = ${AWS::StackName}
+                              region = ${AWS::Region}
+                            owner: root
+                            group: root
+                            mode: 000644
+                        /etc/nginx/conf.d/stream.conf:
+                            content: !Sub |
+                              stream {
+                                server {
+                                    listen ${ListenPort};
+                                    proxy_pass ${DestinationHost}:${DestinationPort};
+                                }
+                              }
+                            owner: root
+                            group: root
+                            mode: 000644
+                        /etc/nginx/nginx.conf:
+                            content: !Sub |
+                              user nginx;
+                              worker_processes auto;
+                              error_log /var/log/nginx/error.log;
+                              pid /var/run/nginx.pid;
+                              
+                              include /usr/share/nginx/modules/*.conf;
+                              include /etc/nginx/conf.d/stream.conf;
+                              events {
+                                worker_connections 1024;
+                              }
+                            owner: root
+                            group: root
+                            mode: 000644
+                        /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+                            content: !Sub |
+                              [cfn-auto-reloader-hook]
+                              triggers=post.update
+                              path=Resources.Worker1.Metadata.AWS::CloudFormation::Init
+                              action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource Worker1 --configsets bootStrap --region ${AWS::Region}
+                              runas=root
+                            mode: 000400
+                            owner: root
+                            group: root
+                    services:
+                        sysvinit:
+                            nginx:
+                                enable: true
+                                ensureRunning: true
+                                files:
+                                  - /etc/nginx/nginx.conf
+                                  - /etc/nginx/conf.d/stream.conf                
+        Properties:
+            ImageId: !Ref AMI
+            InstanceType: !Ref InstanceType
+            SubnetId: !Ref Subnet
+            InstanceInitiatedShutdownBehavior: stop
+            KeyName: !Ref AWSKeyPair
+            Tags:
+              - Key: Name
+                Value: !Ref RelayName
+            UserData:
+              Fn::Base64: !Sub |
+                #!/bin/bash
+                /opt/aws/bin/cfn-init -c bootStrap -v -s ${AWS::StackName} -r Worker1 --region ${AWS::Region}
+                /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Worker1 --region ${AWS::Region}
+            SecurityGroupIds: 
+              - !Ref SecurityGroup
+            
+    SecurityGroup:
+        Type: "AWS::EC2::SecurityGroup"
+        Properties: 
+            GroupDescription: NGINX TCP Relay Security Group
+            SecurityGroupEgress:
+              - IpProtocol: -1
+                CidrIp: 0.0.0.0/0
+            SecurityGroupIngress:
+              - IpProtocol: tcp
+                FromPort: !Ref ListenPort
+                ToPort: !Ref ListenPort
+                CidrIp: 0.0.0.0/0
+              - IpProtocol: tcp
+                FromPort: 22
+                ToPort: 22
+                CidrIp: 0.0.0.0/0
+            Tags:
+              - Key: Name
+                Value: !Ref RelayName
+            VpcId: !Ref VPC
